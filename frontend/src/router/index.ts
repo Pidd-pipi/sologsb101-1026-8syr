@@ -9,6 +9,7 @@ export const ROUTES = {
   tanks: '/tanks',
   batches: '/batches',
   operations: '/operations',
+  pump: '/pump',
   mlf: '/mlf',
   tasting: '/tasting'
 } as const
@@ -26,6 +27,7 @@ export const NAV_ITEMS: NavItem[] = [
   { path: ROUTES.tanks, label: '发酵罐配置', icon: '🛢️', hint: '罐位状态与占用校验' },
   { path: ROUTES.batches, label: '入罐与读数', icon: '📈', hint: '入罐登记与发酵读数' },
   { path: ROUTES.operations, label: '作业编排', icon: '🔁', hint: '倒罐 / 压帽 / 淋皮' },
+  { path: ROUTES.pump, label: '泵机交接', icon: '⛽', hint: '一台移动泵的占用账与交接' },
   { path: ROUTES.mlf, label: '苹乳发酵', icon: '🧪', hint: '苹果酸下降跟踪' },
   { path: ROUTES.tasting, label: '品评与档案', icon: '🍷', hint: '品评调配与导出' }
 ]
@@ -55,6 +57,12 @@ const routes: RouteRecordRaw[] = [
     name: 'operations',
     component: () => import('@/pages/OperationPlan.vue'),
     meta: { title: '倒罐与压帽作业编排' }
+  },
+  {
+    path: ROUTES.pump,
+    name: 'pump',
+    component: () => import('@/pages/PumpBoard.vue'),
+    meta: { title: '泵机交接排班（一张占用账）' }
   },
   {
     path: ROUTES.mlf,

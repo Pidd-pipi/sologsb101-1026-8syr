@@ -52,8 +52,9 @@ onMounted(() => {
           地块 {{ counts.parcels ?? 0 }} · 罐 {{ counts.tanks ?? 0 }} · 批次 {{ counts.batches ?? 0 }}
         </div>
         <div>
-          读数 {{ counts.readings ?? 0 }} · 作业 {{ counts.operations ?? 0 }} · 品评 {{ counts.tastings ?? 0 }}
+          读数 {{ counts.readings ?? 0 }} · 作业 {{ counts.operations ?? 0 }} · 泵机租约 {{ counts.pumpLeases ?? 0 }}
         </div>
+        <div>苹乳 {{ counts.mlfs ?? 0 }} · 品评 {{ counts.tastings ?? 0 }}</div>
       </div>
     </el-aside>
 

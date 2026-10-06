@@ -13,6 +13,7 @@ import type { Reading } from '../types/reading'
 import type { Operation } from '../types/operation'
 import type { Mlf } from '../types/mlf'
 import type { Tasting } from '../types/tasting'
+import type { PumpLease, PumpSnapshot } from '../types/pump'
 import { nowIso } from './uuid'
 import { seedDatabase } from './seed'
 
@@ -20,7 +21,7 @@ import { seedDatabase } from './seed'
 export const DB_NAME = 'gbwinetank-db'
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 1
+export const DB_SCHEMA_VERSION = 2
 
 /** 行结构修订号，便于后续按行迁移 */
 export const ROW_REVISION = 1
@@ -39,6 +40,8 @@ export type ReadingRow = Reading & Revisioned
 export type OperationRow = Operation & Revisioned
 export type MlfRow = Mlf & Revisioned
 export type TastingRow = Tasting & Revisioned
+export type PumpLeaseRow = PumpLease & Revisioned
+export type PumpSnapshotRow = PumpSnapshot & Revisioned
 
 class GbWineTankDatabase extends Dexie {
   parcels!: Table<ParcelRow, string>
@@ -48,11 +51,14 @@ class GbWineTankDatabase extends Dexie {
   operations!: Table<OperationRow, string>
   mlfs!: Table<MlfRow, string>
   tastings!: Table<TastingRow, string>
+  pumpLeases!: Table<PumpLeaseRow, string>
+  pumpSnapshots!: Table<PumpSnapshotRow, string>
 
   constructor() {
     super(DB_NAME)
 
-    this.version(DB_SCHEMA_VERSION)
+    // v1：七张基础表
+    this.version(1)
       .stores({
         parcels: 'id, name, variety, aspect, updatedAt',
         tanks: 'id, code, material, tempControl, state, updatedAt',
@@ -76,6 +82,12 @@ class GbWineTankDatabase extends Dexie {
             })
         }
       })
+
+    // v2：泵机交接排班 —— 租约占用账 + 写入失败恢复快照（新表，旧库自动补建）
+    this.version(2).stores({
+      pumpLeases: 'id, state, sourceTankId, targetTankId, startAt, submittedAt, deviceId, operationId, updatedAt',
+      pumpSnapshots: 'id, createdAt'
+    })
   }
 }
 
@@ -273,6 +285,63 @@ export async function nextOperationSeq(batchId: string): Promise<number> {
   return rows.reduce((max, row) => Math.max(max, row.seq), 0) + 1
 }
 
+/* ------------------------------ 泵机交接排班 ------------------------------ */
+
+export async function listPumpLeases(): Promise<PumpLeaseRow[]> {
+  const rows = await db.pumpLeases.toArray()
+  return rows.sort((a, b) => a.startAt.localeCompare(b.startAt) || a.submittedAt - b.submittedAt)
+}
+
+export async function putPumpLease(row: PumpLeaseRow): Promise<void> {
+  await db.pumpLeases.put(row)
+}
+
+export async function bulkPutPumpLeases(rows: PumpLeaseRow[]): Promise<void> {
+  await db.pumpLeases.bulkPut(rows)
+}
+
+export async function updatePumpLease(id: string, patch: Partial<PumpLease>): Promise<void> {
+  await db.pumpLeases.update(id, { ...patch, updatedAt: Date.now() } as never)
+}
+
+export async function removePumpLease(id: string): Promise<void> {
+  await db.pumpLeases.delete(id)
+}
+
+/** 写入失败恢复：用快照整体覆盖租约账 */
+export async function restorePumpLeases(leases: PumpLease[]): Promise<void> {
+  await db.transaction('rw', db.pumpLeases, async () => {
+    await db.pumpLeases.clear()
+    await db.pumpLeases.bulkPut(
+      leases.map((lease) => ({ ...lease, revision: ROW_REVISION, createdAt: Date.now(), updatedAt: Date.now() }))
+    )
+  })
+}
+
+/** 拍一张当时快照（写入前调用，失败时可 restore） */
+export async function savePumpSnapshot(snapshot: PumpSnapshot): Promise<void> {
+  await db.pumpSnapshots.put({
+    ...snapshot,
+    revision: ROW_REVISION,
+    createdAt: snapshot.createdAt,
+    updatedAt: Date.now()
+  })
+}
+
+export async function listPumpSnapshots(): Promise<PumpSnapshotRow[]> {
+  const rows = await db.pumpSnapshots.toArray()
+  return rows.sort((a, b) => b.createdAt - a.createdAt)
+}
+
+export async function latestPumpSnapshot(): Promise<PumpSnapshotRow | undefined> {
+  const rows = await listPumpSnapshots()
+  return rows[0]
+}
+
+export async function clearPumpSnapshots(): Promise<void> {
+  await db.pumpSnapshots.clear()
+}
+
 /* ------------------------------ 苹乳发酵 ------------------------------ */
 
 export async function listMlfs(): Promise<MlfRow[]> {
@@ -323,6 +392,8 @@ export interface DatabaseSnapshot {
   operations: Operation[]
   mlfs: Mlf[]
   tastings: Tasting[]
+  pumpLeases?: PumpLease[]
+  pumpSnapshots?: PumpSnapshot[]
 }
 
 function stripRow<T extends Revisioned>(row: T): Omit<T, keyof Revisioned> {
@@ -334,15 +405,18 @@ function stripRow<T extends Revisioned>(row: T): Omit<T, keyof Revisioned> {
 }
 
 export async function exportSnapshot(): Promise<DatabaseSnapshot> {
-  const [parcels, tanks, batches, readings, operations, mlfs, tastings] = await Promise.all([
-    db.parcels.toArray(),
-    db.tanks.toArray(),
-    db.batches.toArray(),
-    db.readings.toArray(),
-    db.operations.toArray(),
-    db.mlfs.toArray(),
-    db.tastings.toArray()
-  ])
+  const [parcels, tanks, batches, readings, operations, mlfs, tastings, pumpLeases, pumpSnapshots] =
+    await Promise.all([
+      db.parcels.toArray(),
+      db.tanks.toArray(),
+      db.batches.toArray(),
+      db.readings.toArray(),
+      db.operations.toArray(),
+      db.mlfs.toArray(),
+      db.tastings.toArray(),
+      db.pumpLeases.toArray(),
+      db.pumpSnapshots.toArray()
+    ])
   return {
     name: DB_NAME,
     schemaVersion: DB_SCHEMA_VERSION,
@@ -353,18 +427,36 @@ export async function exportSnapshot(): Promise<DatabaseSnapshot> {
     readings: readings.map(stripRow),
     operations: operations.map(stripRow),
     mlfs: mlfs.map(stripRow),
-    tastings: tastings.map(stripRow)
+    tastings: tastings.map(stripRow),
+    pumpLeases: pumpLeases.map(stripRow),
+    // 快照行自带 createdAt，直接原样带出，供导入端恢复恢复点
+    pumpSnapshots: pumpSnapshots.map((row) => {
+      const copy = { ...row } as Record<string, unknown>
+      delete copy.revision
+      delete copy.updatedAt
+      return copy as unknown as PumpSnapshot
+    })
   }
 }
 
 function stamp<T>(row: T): T & Revisioned {
-  return { ...row, revision: ROW_REVISION, createdAt: Date.now(), updatedAt: Date.now() }
+  return { ...row, revision: ROW_REVISION, createdAt: Date.now(), updatedAt: Date.now() } as T & Revisioned
 }
 
 export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> {
   await db.transaction(
     'rw',
-    [db.parcels, db.tanks, db.batches, db.readings, db.operations, db.mlfs, db.tastings],
+    [
+      db.parcels,
+      db.tanks,
+      db.batches,
+      db.readings,
+      db.operations,
+      db.mlfs,
+      db.tastings,
+      db.pumpLeases,
+      db.pumpSnapshots
+    ],
     async () => {
       await Promise.all([
         db.parcels.clear(),
@@ -373,7 +465,9 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
         db.readings.clear(),
         db.operations.clear(),
         db.mlfs.clear(),
-        db.tastings.clear()
+        db.tastings.clear(),
+        db.pumpLeases.clear(),
+        db.pumpSnapshots.clear()
       ])
       await db.parcels.bulkPut(snapshot.parcels.map(stamp))
       await db.tanks.bulkPut(snapshot.tanks.map(stamp))
@@ -382,6 +476,14 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
       await db.operations.bulkPut(snapshot.operations.map(stamp))
       await db.mlfs.bulkPut(snapshot.mlfs.map(stamp))
       await db.tastings.bulkPut(snapshot.tastings.map(stamp))
+      if (snapshot.pumpLeases) {
+        await db.pumpLeases.bulkPut(snapshot.pumpLeases.map(stamp))
+      }
+      if (snapshot.pumpSnapshots) {
+        for (const snap of snapshot.pumpSnapshots) {
+          await db.pumpSnapshots.put(stamp(snap))
+        }
+      }
     }
   )
 }
@@ -390,7 +492,17 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
 export async function resetDatabase(): Promise<void> {
   await db.transaction(
     'rw',
-    [db.parcels, db.tanks, db.batches, db.readings, db.operations, db.mlfs, db.tastings],
+    [
+      db.parcels,
+      db.tanks,
+      db.batches,
+      db.readings,
+      db.operations,
+      db.mlfs,
+      db.tastings,
+      db.pumpLeases,
+      db.pumpSnapshots
+    ],
     async () => {
       await Promise.all([
         db.parcels.clear(),
@@ -399,7 +511,9 @@ export async function resetDatabase(): Promise<void> {
         db.readings.clear(),
         db.operations.clear(),
         db.mlfs.clear(),
-        db.tastings.clear()
+        db.tastings.clear(),
+        db.pumpLeases.clear(),
+        db.pumpSnapshots.clear()
       ])
     }
   )
@@ -408,14 +522,17 @@ export async function resetDatabase(): Promise<void> {
 
 /** 各表行数统计，供页脚与概览展示 */
 export async function countAll(): Promise<Record<string, number>> {
-  const [parcels, tanks, batches, readings, operations, mlfs, tastings] = await Promise.all([
-    db.parcels.count(),
-    db.tanks.count(),
-    db.batches.count(),
-    db.readings.count(),
-    db.operations.count(),
-    db.mlfs.count(),
-    db.tastings.count()
-  ])
-  return { parcels, tanks, batches, readings, operations, mlfs, tastings }
+  const [parcels, tanks, batches, readings, operations, mlfs, tastings, pumpLeases, pumpSnapshots] =
+    await Promise.all([
+      db.parcels.count(),
+      db.tanks.count(),
+      db.batches.count(),
+      db.readings.count(),
+      db.operations.count(),
+      db.mlfs.count(),
+      db.tastings.count(),
+      db.pumpLeases.count(),
+      db.pumpSnapshots.count()
+    ])
+  return { parcels, tanks, batches, readings, operations, mlfs, tastings, pumpLeases, pumpSnapshots }
 }

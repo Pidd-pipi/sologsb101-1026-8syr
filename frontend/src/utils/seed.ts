@@ -3,7 +3,16 @@
  * 只在 parcels 表为空时执行，地块 → 发酵罐 → 批次 → 读数/作业/苹乳/品评 三层互相引用，
  * 保证 6 个页面第一次进入都有可点通的内容。函数本身幂等：由调用方判定表是否为空。
  */
-import type { ParcelRow, TankRow, BatchRow, ReadingRow, OperationRow, MlfRow, TastingRow } from './db'
+import type {
+  ParcelRow,
+  TankRow,
+  BatchRow,
+  ReadingRow,
+  OperationRow,
+  MlfRow,
+  TastingRow,
+  PumpLeaseRow
+} from './db'
 import { db, ROW_REVISION } from './db'
 
 function rev<T>(row: T): T & { revision: number; createdAt: number; updatedAt: number } {
@@ -117,11 +126,149 @@ const TASTINGS: Array<Omit<TastingRow, 'revision' | 'createdAt' | 'updatedAt'>> 
   }
 ]
 
-/** 灌入演示数据（地块 → 罐 → 批次 → 读数/作业/苹乳/品评） */
+const PUMP_LEASES: Array<Omit<PumpLeaseRow, 'revision' | 'createdAt' | 'updatedAt'>> = (() => {
+  // 租约时段相对当前时间生成，保证泵机交接页打开就能看到「今天」的排班。
+  // 初始液位：F-01=2600/3000、F-02=2000/2250、F-03=0/1500 空闲、F-04=0/5000 清洗中。
+  const isoAt = (addHours: number): string => {
+    const d = new Date()
+    d.setMinutes(0, 0, 0)
+    d.setHours(d.getHours() + addHours)
+    return d.toISOString()
+  }
+  const t0 = Date.now()
+  return [
+    {
+      id: 'pl-001',
+      title: 'F-01 赤霞珠部分转 F-03',
+      jobType: '倒罐',
+      drainMode: '部分',
+      sourceTankId: 'tk-001',
+      targetTankId: 'tk-003',
+      volumeL: 1000,
+      startAt: isoAt(3),
+      endAt: isoAt(4),
+      submittedAt: t0 - 5200,
+      deviceId: 'tablet-A',
+      operationId: 'op-004',
+      state: '已派工',
+      rejectReason: '',
+      suggestedStartAt: null,
+      conflictsWith: [],
+      rerunNo: 0
+    },
+    {
+      id: 'pl-002',
+      title: 'F-02 梅洛清空转 F-04（目标罐清洗未完成）',
+      jobType: '倒罐',
+      drainMode: '清空',
+      sourceTankId: 'tk-002',
+      targetTankId: 'tk-004',
+      volumeL: 2000,
+      startAt: isoAt(5),
+      endAt: isoAt(6),
+      submittedAt: t0 - 4600,
+      deviceId: 'tablet-A',
+      operationId: 'op-007',
+      state: '待重排',
+      rejectReason: '罐 F-04 清洗未完成，作业失效待重排',
+      suggestedStartAt: null,
+      conflictsWith: [],
+      rerunNo: 1
+    },
+    {
+      id: 'pl-003',
+      title: 'F-02 淋皮回泵 F-03（晚提交，排队）',
+      jobType: '淋皮回泵',
+      drainMode: '部分',
+      sourceTankId: 'tk-002',
+      targetTankId: 'tk-003',
+      volumeL: 500,
+      startAt: isoAt(3),
+      endAt: isoAt(4),
+      submittedAt: t0 - 1200,
+      deviceId: 'tablet-A',
+      operationId: null,
+      state: '排队中',
+      rejectReason: '同一泵机时段已有先提交的租约 pl-001，按先提交先得排队等待',
+      suggestedStartAt: isoAt(4),
+      conflictsWith: ['pl-001'],
+      rerunNo: 0
+    },
+    {
+      id: 'pl-004',
+      title: 'F-01 清空转 F-03（目标罐容量不足被拒）',
+      jobType: '倒罐',
+      drainMode: '清空',
+      sourceTankId: 'tk-001',
+      targetTankId: 'tk-003',
+      volumeL: 2600,
+      startAt: isoAt(2),
+      endAt: isoAt(3),
+      submittedAt: t0 - 800,
+      deviceId: 'tablet-A',
+      operationId: null,
+      state: '已拒绝',
+      rejectReason: '目标罐容量不足：受入后液位 2600L / 容量 1500L，还差 1100L',
+      suggestedStartAt: null,
+      conflictsWith: [],
+      rerunNo: 0
+    },
+    {
+      id: 'pl-005',
+      title: '夜班补录：F-01 淋皮回泵（平板 A）',
+      jobType: '淋皮回泵',
+      drainMode: '部分',
+      sourceTankId: 'tk-001',
+      targetTankId: 'tk-003',
+      volumeL: 400,
+      startAt: isoAt(26),
+      endAt: isoAt(27),
+      submittedAt: t0 - 3000,
+      deviceId: 'tablet-A',
+      operationId: null,
+      state: '待确认',
+      rejectReason: '两台平板断网补录后时段重叠，并列待确认',
+      suggestedStartAt: null,
+      conflictsWith: ['pl-006'],
+      rerunNo: 0
+    },
+    {
+      id: 'pl-006',
+      title: '夜班补录：F-02 淋皮回泵（平板 B）',
+      jobType: '淋皮回泵',
+      drainMode: '部分',
+      sourceTankId: 'tk-002',
+      targetTankId: 'tk-003',
+      volumeL: 300,
+      startAt: isoAt(26),
+      endAt: isoAt(27),
+      submittedAt: t0 - 2600,
+      deviceId: 'tablet-B',
+      operationId: null,
+      state: '待确认',
+      rejectReason: '两台平板断网补录后时段重叠，并列待确认',
+      suggestedStartAt: null,
+      conflictsWith: ['pl-005'],
+      rerunNo: 0
+    }
+  ]
+})()
+
+/** 灌入演示数据（地块 → 罐 → 批次 → 读数/作业/苹乳/品评 + 泵机租约占用账） */
 export async function seedDatabase(): Promise<void> {
   await db.transaction(
     'rw',
-    [db.parcels, db.tanks, db.batches, db.readings, db.operations, db.mlfs, db.tastings],
+    [
+      db.parcels,
+      db.tanks,
+      db.batches,
+      db.readings,
+      db.operations,
+      db.mlfs,
+      db.tastings,
+      db.pumpLeases,
+      db.pumpSnapshots
+    ],
     async () => {
       await db.parcels.bulkPut(PARCELS.map(rev))
       await db.tanks.bulkPut(TANKS.map(rev))
@@ -130,6 +277,7 @@ export async function seedDatabase(): Promise<void> {
       await db.operations.bulkPut(OPERATIONS.map(rev))
       await db.mlfs.bulkPut(MLFS.map(rev))
       await db.tastings.bulkPut(TASTINGS.map(rev))
+      await db.pumpLeases.bulkPut(PUMP_LEASES.map(rev))
     }
   )
 }
