@@ -7,7 +7,7 @@ import { onScopeDispose, ref, shallowRef, type Ref } from 'vue'
 import { db, ROW_REVISION } from '@/utils/db'
 import { createId } from '@/utils/uuid'
 
-export type IdbRecord = { id: string; createdAt?: number; updatedAt?: number }
+export type IdbRecord = { id: string; createdAt?: number | string; updatedAt?: number | string }
 
 export interface UseIdbTableOptions<T extends IdbRecord> {
   /** 结果排序器，默认按 updatedAt 倒序 */
@@ -35,9 +35,11 @@ export interface UseIdbTableResult<T extends IdbRecord> {
   clear: () => Promise<void>
 }
 
-/** 默认排序：最近更新的排前面 */
+/** 默认排序：最近更新的排前面（兼容时间戳数字与 ISO 字符串两种 createdAt） */
 function defaultCompare<T extends IdbRecord>(a: T, b: T): number {
-  return (b.updatedAt ?? 0) - (a.updatedAt ?? 0)
+  const av = typeof a.updatedAt === 'number' ? a.updatedAt : Date.parse(String(a.updatedAt ?? 0))
+  const bv = typeof b.updatedAt === 'number' ? b.updatedAt : Date.parse(String(b.updatedAt ?? 0))
+  return (Number.isNaN(bv) ? 0 : bv) - (Number.isNaN(av) ? 0 : av)
 }
 
 export function useIdbTable<T extends IdbRecord>(

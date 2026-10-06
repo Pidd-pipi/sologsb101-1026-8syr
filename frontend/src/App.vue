@@ -54,6 +54,9 @@ onMounted(() => {
         <div>
           读数 {{ counts.readings ?? 0 }} · 作业 {{ counts.operations ?? 0 }} · 品评 {{ counts.tastings ?? 0 }}
         </div>
+        <div>
+          占用账 {{ counts.pumpLedger ?? 0 }} 条 · 待合并补录 {{ counts.pumpBackfill ?? 0 }}
+        </div>
       </div>
     </el-aside>
 

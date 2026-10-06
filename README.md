@@ -2,7 +2,7 @@
 
 面向酒庄酿酒师与发酵车间班组的本地化车间台账：按地块采收把葡萄入罐发酵，逐日记录比重、温度与糖度，编排倒罐、压帽与淋皮作业，跟踪苹果酸乳酸发酵进度，并在出罐前完成品评与调配结论。
 
-核心动作：**建地块与品种 → 配置发酵罐容量 → 录发酵读数 → 排作业工序 → 启动苹乳发酵 → 录品评并导出批次档案**。
+核心动作：**建地块与品种 → 配置发酵罐容量 → 录发酵读数 → 排作业工序 → 泵机交接排班（一台移动泵共用占用账）→ 启动苹乳发酵 → 录品评并导出批次档案**。
 
 纯前端单页应用（Vue 3 + TypeScript + Element Plus + Vite + Pinia + Vue Router + Dexie），**无后端、无数据库服务、无 API 服务**，全部数据保存在浏览器本地（IndexedDB），刷新或重启浏览器后仍然存在。
 
@@ -69,6 +69,7 @@ npm run preview    # 本地预览构建产物（http://localhost:22826）
 | `/tanks` | 发酵罐容量配置与罐位看板 | Tank、Batch | 按材质/温控/罐位筛选、罐位占用冲突校验、清洗状态流转 |
 | `/batches` | 入罐登记与发酵读数 | Batch、Reading、Parcel、Tank | 绑定地块与罐入罐、逐日录比重/温度/糖度、趋势条、超温标记、出罐释放罐位 |
 | `/operations` | 倒罐与压帽作业编排 | Operation、Batch | 按日期排班、拖拽调序（含上下移按钮）、指派操作人、完成回写批次最近作业时间 |
+| `/pump` | 泵机交接排班与共用占用账 | PumpLedger、PumpBackfill、PumpSnapshot、Tank | 发酵罐液体 / 泵机时段 / 倒罐作业共用一张占用账；同一泵机时段先提交者持约；容量不足或源罐未清空写明差量拒绝派工；罐号改动 / 撤单后未执行作业失效重排并留存写入前快照；两台平板断网补录合并，重叠时段并列待确认 |
 | `/mlf` | 苹果酸乳酸发酵跟踪 | Mlf、Batch、Reading | 启动苹乳、逐次录入苹果酸、低于阈值自动判定结束并联动批次状态 |
 | `/tasting` | 品评调配与批次档案 | Tasting 及全部模型 | 同批次多次品评并列对比、批次档案 JSON 导出、本地库版本查看与整库导入导出 |
 
@@ -90,12 +91,13 @@ sologsb101-1026/
     ├── public/favicon.svg
     └── src/
         ├── main.ts  App.vue  env.d.ts
-        ├── types/              # parcel.ts tank.ts batch.ts reading.ts operation.ts mlf.ts tasting.ts filter.ts
-        ├── stores/             # parcelStore tankStore batchStore operationStore mlfStore
+        ├── types/              # parcel.ts tank.ts batch.ts reading.ts operation.ts pump.ts mlf.ts tasting.ts filter.ts
+        ├── stores/             # parcelStore tankStore batchStore operationStore pumpStore mlfStore
         ├── components/common/  # StageTag.vue FilterBar.vue StatBadge.vue EmptyPanel.vue
-        ├── hooks/              # useFermentTrend.ts useIdbTable.ts
-        ├── utils/              # gravity.ts db.ts export.ts seed.ts uuid.ts query.ts
-        ├── pages/              # ParcelList TankBoard BatchReading OperationPlan MlfBoard TastingExport
+        ├── components/pump/    # PumpDispatchForm PumpTimeline TankLevels PumpLedgerTable PumpBackfillPanel PumpSnapshotPanel
+        ├── hooks/              # useFermentTrend.ts useIdbTable.ts usePumpBoard.ts
+        ├── utils/              # gravity.ts db.ts pumpSchedule.ts seedPump.ts export.ts seed.ts uuid.ts query.ts
+        ├── pages/              # ParcelList TankBoard BatchReading OperationPlan PumpSchedule MlfBoard TastingExport
         ├── styles/main.css
         └── router/index.ts
 ```
@@ -104,9 +106,10 @@ sologsb101-1026/
 
 ## 六、数据存储说明
 
-- **IndexedDB 库名**：`gbwinetank-db`（Dexie 封装），结构版本号 `version(1)`，并带 `upgrade()` 迁移逻辑（为历史行补齐行修订号与时间戳）。
-- **分表存储**：`parcels` 地块、`tanks` 发酵罐、`batches` 入罐批次、`readings` 发酵读数、`operations` 作业、`mlfs` 苹乳发酵、`tastings` 品评调配，共 7 张表；每行带 `revision` / `createdAt` / `updatedAt`。
-- **首屏自动播种**：`utils/db.ts` 的 `initDatabase()` 在 `parcels` 表为空时调用 `seedDatabase()`，灌入互相引用的三层演示数据（地块 → 发酵罐 → 批次 → 读数/作业/苹乳/品评），保证每个页面首次打开都有内容；播种幂等，清空后重进会重新播种。
+- **IndexedDB 库名**：`gbwinetank-db`（Dexie 封装），结构版本号 `version(2)`：v1 为七张基础表带 `upgrade()` 迁移；v2 增量新增泵机交接排班三张表，老库打开时自动升级。
+- **分表存储**：`parcels` 地块、`tanks` 发酵罐、`batches` 入罐批次、`readings` 发酵读数、`operations` 作业、`mlfs` 苹乳发酵、`tastings` 品评调配，共 7 张基础表；泵机模块另有 `pumpLedger` 共用占用账（`liquid` 罐液体流水 / `lease` 泵机时段租约 / `job` 倒罐作业，判别联合同表）、`pumpBackfill` 平板断网补录 outbox、`pumpSnapshots` 写入前快照；每行带 `revision` / `createdAt` / `updatedAt`。
+- **泵机交接规则**：全车间一台移动泵，同一时段两份提交只保留**先提交**的租约（在线后到者自动改期到下一空时段；断网补录后到者与既有租约**并列待确认**由班长裁决）；派工前校验目标罐空余容量（含排队中的倒入）与源罐是否清空，不足即拒绝并写明「还差 / 还剩多少 L」；罐号改动或撤单后未执行作业立即「已失效」并按提交先后紧凑重排（吃掉空出的泵机时段）；每个写动作落库前自动留存快照，可从当时快照恢复占用账 / 补录队列 / 罐号。
+- **首屏自动播种**：`utils/db.ts` 的 `initDatabase()` 在 `parcels` 表为空时调用 `seedDatabase()`，灌入互相引用的三层演示数据（地块 → 发酵罐 → 批次 → 读数/作业/苹乳/品评），保证每个页面首次打开都有内容；`pumpLedger` 为空时再调用 `seedPumpLedger()` 幂等补播泵机演示数据（含一条容量不足待派工与一条断网撞期待确认）；播种幂等，清空后重进会重新播种。
 - **无后端**：没有 API 服务、没有数据库容器；容器本身无状态，不挂载任何卷。
 - **数据迁移**：在「品评与批次档案」页可导出整库 JSON 备份，或导出单批次档案；在其它设备用「导入备份」还原。
 - **级联规则**：删除地块会级联删除其下批次与批次的读数/作业/苹乳/品评并释放罐位；在罐批次不允许删除发酵罐。

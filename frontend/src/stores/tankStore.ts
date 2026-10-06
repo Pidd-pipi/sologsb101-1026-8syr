@@ -8,6 +8,7 @@ import type { Tank, TankState } from '@/types/tank'
 import type { FilterModel } from '@/types/filter'
 import type { BatchRow, TankRow } from '@/utils/db'
 import { assertTankAssignable, putTank, removeTank, updateTank as updateTankRow, ROW_REVISION } from '@/utils/db'
+import { renameTankCode } from '@/utils/pumpSchedule'
 import { createId } from '@/utils/uuid'
 import { queryToFilters } from '@/utils/query'
 
@@ -57,8 +58,23 @@ export const useTankStore = defineStore('tank', () => {
     return id
   }
 
-  async function updateTank(id: string, patch: Partial<Tank>): Promise<void> {
+  /**
+   * 更新罐配置；仅当罐号变化时，先让引用该罐的未执行倒罐作业立即失效重排，
+   * 再写新罐号（写入前快照由泵机服务留存，可恢复）。
+   */
+  async function updateTank(id: string, patch: Partial<Tank>): Promise<{ reruns: string[] }> {
+    if (typeof patch.code === 'string') {
+      const { reruns } = await renameTankCode(id, patch.code.trim())
+      // 罐号已由 pumpSchedule 写入，其余字段照常更新
+      const { code: _code, ...rest } = patch
+      void _code
+      if (Object.keys(rest).length > 0) {
+        await updateTankRow(id, rest)
+      }
+      return { reruns }
+    }
     await updateTankRow(id, patch)
+    return { reruns: [] }
   }
 
   async function deleteTank(id: string): Promise<void> {
